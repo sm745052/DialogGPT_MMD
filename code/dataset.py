@@ -52,6 +52,12 @@ class CaptionDataset:
                     ),
                     **TEST_CONFIG,
                 )
+                # IDX = "te_bst:185__u11__s37"
+                # self.raw_data = DialogCCData(
+                #     path=([self.raw_data.dialog_suffix_by_id[IDX][0]], [self.raw_data.dialog_suffix_by_id[IDX][1]]),
+                #     # to_split=True,
+                # )
+                # print("Test data loaded")
             else:
                 self.raw_data = DialogCCData(
                     path=data_path,

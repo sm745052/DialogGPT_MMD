@@ -29,16 +29,14 @@ from chatas.code.utils.dataset import (
 from collections import defaultdict
 import string
 import logging
-
+import pandas as pd
 import time
 from tqdm import tqdm
 
 
+logging.basicConfig(level="WARNING")
+
 MODEL = "microsoft/dialogpt-medium"
-CKPT = "ckpt/dialogcc/checkpoint-1500"
-
-OUTPUT_FOLDER = "."
-
 
 BATCH_SIZE = 32
 
@@ -77,6 +75,9 @@ class Trie:
                 self.trie[word[:i]].add(tuple(token_ids[: ctr + 1]))
 
     def __getitem__(self, key):
+        if key not in self.trie:
+            token_ids = self.tokenizer.encode(key, add_special_tokens=False)
+            self.trie[key] = set([tuple(token_ids)])
         return self.trie[key]
 
     def __len__(self):
@@ -181,6 +182,7 @@ def encode(tokenizer, text):
 
 def encode_batch(tokenizer, texts):
     utterances = [text.replace("<eou>", tokenizer.eos_token) for text in texts]
+    logging.info(f"{utterances=}")
     enc = tokenizer(
         utterances,
         max_length=TOKENIZER_MAX_LENGTH,
@@ -189,7 +191,12 @@ def encode_batch(tokenizer, texts):
         return_tensors="pt",
         padding_side="left",
         padding = "max_length",
+        # truncation_side="left",
     )
+    dec = []
+    for i in range(len(utterances)):
+        dec.append(tokenizer.decode(enc["input_ids"][i], skip_special_tokens=False))
+    logging.info(f"{dec=}")
     return enc
 
 
@@ -224,13 +231,13 @@ def predict_adv(inp: str, trie: Trie, tokenizer, model, full_vocab):
         probable_completions = []
     else:
         probable_completions = trie[" " + last_word]
-        probable_completions_tokens = [
-            [
-                tokenizer.decode([token_id], skip_special_tokens=False)
-                for token_id in token_sequence
-            ]
-            for token_sequence in probable_completions
-        ]
+        # probable_completions_tokens = [
+        #     [
+        #         tokenizer.decode([token_id], skip_special_tokens=False)
+        #         for token_id in token_sequence
+        #     ]
+        #     for token_sequence in probable_completions
+        # ]
         # print(f"{probable_completions_tokens=}")
     for completion in probable_completions:
         subword_trie.add_token_id_sequence(completion)
@@ -286,7 +293,8 @@ def predict_normal_batch(inp: List[str], tokenizer, model):
     )
     completions = tokenizer.batch_decode(output, skip_special_tokens=False)
     input_as_seen = tokenizer.batch_decode(encs["input_ids"], skip_special_tokens=False)
-    # print(f"FROM NORMAL {input_as_seen=}")
+    logging.info(f"FROM NORMAL {completions=}")
+    logging.info(f"FROM NORMAL {input_as_seen=}")
     return [
         completion[len(input_as_seen[i]) :].replace(tokenizer.eos_token, "")
         for i, completion in enumerate(completions)
@@ -325,13 +333,15 @@ def predict_adv_batch(
             last_word = last_incomplete_word
         # print(f"{main_sent=}")
         # print(f"{last_word=}")
+        logging.info(f"{main_sent=}")
+        logging.info(f"{last_word=}")
         main_sents.append(main_sent)
         last_words.append(last_word)
     probable_completions = [
         trie[" " + last_word] if last_word != "" else []
         for last_word in last_words
     ]
-    # print(f"{probable_completions=}")
+    logging.info(f"{probable_completions=}")
     for i, probable_completion in enumerate(probable_completions):
         for completion in probable_completion:
             subword_tries[i].add_token_id_sequence(completion)
@@ -359,12 +369,14 @@ def predict_adv_batch(
         pad_token_id=tokenizer.eos_token_id,
     )
     completions = tokenizer.batch_decode(outputs, skip_special_tokens=False)
-    # print(f"{completions=}")
     input_as_seen = [
         get_input_as_seen(enc, last_word, tokenizer)
         for enc, last_word in zip(encs["input_ids"], last_words)
     ]
-    # print(f"FROM NORMAL {input_as_seen=}")
+    # print(f"FROM ADV {completions=}")
+    # print(f"FROM ADV {input_as_seen=}")
+    logging.info(f"FROM ADV {completions=}")
+    logging.info(f"FROM ADV {input_as_seen=}")
     return [
         completion[len(input_as_seen[i]) :].replace(tokenizer.eos_token, "")
         for i, completion in enumerate(completions)
@@ -393,56 +405,50 @@ def predict_batch(inp: List[str], trie, tokenizer, model, full_vocab):
     return res
 
 
-def get_lines(file):
-    with open(file, "r") as f:
-        lines_ = f.readlines()
-    lines_ = lines_[len(lines_) // 2:]
-    lines = [line.split("\t")[0] for line in lines_]
-    preds = [
-        line.split("\t")[1].strip("\n") if len(line.split("\t")) > 1 else ""
-        for line in lines_
-    ]
-    for i in range(len(lines)):
-        last_uttr = lines[i].split("<eou>")[-1]
-        if lines[i][: -len(last_uttr)].endswith("<eou>"):
-            lines[i] = lines[i][: -len(last_uttr)] + " " + last_uttr
-    # print(f"{lines[0]=}")
-    return lines, preds
-
-
 if __name__ == '__main__':
-    model = AutoModelForCausalLM.from_pretrained(CKPT)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--csv_path", type=str)
+    parser.add_argument("--ckpt", type=str)
+    args = parser.parse_args()
+    model = AutoModelForCausalLM.from_pretrained(args.ckpt)
+    tokenizer = get_tokenizer(MODEL)
     tokenizer.add_special_tokens({"additional_special_tokens": [IMAGE_TOKEN]})
     # model.resize_token_embeddings(len(tokenizer))
     assert model.config.vocab_size == len(tokenizer)
     tokenizer.pad_token_id = tokenizer.eos_token_id
     full_vocab = list(range(len(tokenizer)))
     model.config.pad_token_id = tokenizer.eos_token_id
-
+    logging.info(f"{tokenizer.truncation_side=}")
 
     train_dataset = CaptionDataset(tokenizer, f"{DIALOGCC_DATA_PATH}test.csv", test = False)
     trie = make_trie(train_dataset, tokenizer)
     dataset = CaptionDataset(tokenizer, f"{DIALOGCC_DATA_PATH}test.csv", test=True)
 
-    times = []
-    if not os.path.exists(OUTPUT_FOLDER):
-        os.makedirs(OUTPUT_FOLDER)
+
+    if not os.path.exists(args.csv_path):
+        os.makedirs(os.path.dirname(args.csv_path), exist_ok=True)
+        pd.DataFrame(columns = ["idx", "pred"]).to_csv(args.csv_path, index=False)
     
-    with open(f"{OUTPUT_FOLDER}predictions.txt", "w") as f:
-        model.to("cuda")
-        model.eval()
-        for batch_idx in tqdm(range(0, len(dataset), BATCH_SIZE)):
-            batch = [dataset[i] for i in range(batch_idx, min(batch_idx + BATCH_SIZE, len(dataset)))]
-            # batch = dataset[batch_idx: batch_idx + BATCH_SIZE]
-            start = time.time()
-            completions = predict_batch(
-                [b["full_text"] for b in batch], trie, tokenizer, model, full_vocab
-            )
-            end = time.time()
-            times.append(end - start)
-            for idx, line in enumerate(batch):
-                f.write(f"{line['idx']}\t{line['full_text']}\t{line['suffix']}\t{completions[idx]}\t1\t1\n")
-    
+    model.to("cuda")
+    model.eval()
+    for batch_idx in tqdm(range(0, len(dataset), BATCH_SIZE)):
+        start = time.time()
+        batch = [dataset[i] for i in range(batch_idx, min(batch_idx + BATCH_SIZE, len(dataset)))]
+        print(f"time taken to load batch {batch_idx}: {time.time() - start}")
+        # batch = dataset[batch_idx: batch_idx + BATCH_SIZE]
+        start = time.time()
+        completions = predict_batch(
+            [b["full_text"] for b in batch], trie, tokenizer, model, full_vocab
+        )
+        print(f"time taken to predict batch {batch_idx}: {time.time() - start}")
+        start = time.time()
+        predictions_data = []
+        for idx, line in enumerate(batch):
+            predictions_data.append({
+                "idx": line["idx"],
+                "pred": completions[idx]
+            })
+        pd.DataFrame(predictions_data).to_csv(args.csv_path, mode='a', header=False, index=False)
+        print(f"Time taken to write batch {batch_idx}: {time.time() - start}")
     # model.resize_token_embeddings(len(tokenizer))
     # model.load_state_dict(torch.load(CKPT))
